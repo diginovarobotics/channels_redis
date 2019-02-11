@@ -8,24 +8,7 @@ import types
 
 import aioredis
 
-from channels_redis.core import RedisChannelLayer
-
-
-def _wrap_close(loop, pool):
-    """
-    Decorate an event loop's close method with our own.
-    """
-    original_impl = loop.close
-
-    def _wrapper(self, *args, **kwargs):
-        # If the event loop was closed, there's nothing we can do anymore.
-        if not self.is_closed():
-            self.run_until_complete(pool.close_loop(self))
-        # Restore the original close() implementation after we're done.
-        self.close = original_impl
-        return self.close(*args, **kwargs)
-
-    loop.close = types.MethodType(_wrapper, loop)
+from channels_redis.core import RedisChannelLayer, ChannelLock, _wrap_close
 
 
 class SentinelConnectionPool:
@@ -123,46 +106,6 @@ class SentinelConnectionPool:
             await conn.wait_closed()
 
 
-class ChannelLock:
-    """
-    Helper class for per-channel locking.
-
-    Once a lock is released and has no waiters, it will also be deleted,
-    to mitigate multi-event loop problems.
-    """
-
-    def __init__(self):
-        self.locks = collections.defaultdict(asyncio.Lock)
-        self.wait_counts = collections.defaultdict(int)
-
-    async def acquire(self, channel):
-        """
-        Acquire the lock for the given channel.
-        """
-        self.wait_counts[channel] += 1
-        return await self.locks[channel].acquire()
-
-    def locked(self, channel):
-        """
-        Return ``True`` if the lock for the given channel is acquired.
-        """
-        return self.locks[channel].locked()
-
-    def release(self, channel):
-        """
-        Release the lock for the given channel.
-        """
-        self.locks[channel].release()
-        self.wait_counts[channel] -= 1
-        if self.wait_counts[channel] < 1:
-            del self.locks[channel]
-            del self.wait_counts[channel]
-
-
-class UnsupportedRedis(Exception):
-    pass
-
-
 class RedisSentinelChannelLayer(RedisChannelLayer):
     """
     Redis Sentinel channel layer.
@@ -253,24 +196,6 @@ class RedisSentinelChannelLayer(RedisChannelLayer):
                     "You must pass a list of Redis shards containing a list of Redis sentinel Nodes, even if there is only one."
                 )
         return hosts, masters
-
-    def _setup_encryption(self, symmetric_encryption_keys):
-        # See if we can do encryption if they asked
-        if symmetric_encryption_keys:
-            if isinstance(symmetric_encryption_keys, (str, bytes)):
-                raise ValueError(
-                    "symmetric_encryption_keys must be a list of possible keys"
-                )
-            try:
-                from cryptography.fernet import MultiFernet
-            except ImportError:
-                raise ValueError(
-                    "Cannot run with encryption without 'cryptography' installed."
-                )
-            sub_fernets = [self.make_fernet(key) for key in symmetric_encryption_keys]
-            self.crypter = MultiFernet(sub_fernets)
-        else:
-            self.crypter = None
 
     ### Connection handling ###
 
